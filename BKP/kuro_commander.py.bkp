@@ -1,0 +1,225 @@
+import os
+import shutil
+import subprocess
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+ADB_PATH = r"C:\Users\hanenashi\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+current_local_path = os.getcwd()
+current_device_path = "/storage/emulated/0/"
+
+def parent(path):
+    return os.path.dirname(path.rstrip("/\\").rstrip("/\\"))
+
+def build_breadcrumb(frame, path, is_device=False):
+    for widget in frame.winfo_children():
+        widget.destroy()
+    norm = path.strip("/\\")
+    parts = norm.split("/") if is_device else norm.split(os.sep)
+    full_path = "/" if is_device else os.path.splitdrive(path)[0] + os.sep if ":" in path else os.sep
+    for i, part in enumerate(parts):
+        full_path = full_path.rstrip("/\\")
+        full_path += "/" + part if is_device else os.sep + part
+        btn = tk.Button(frame, text=part, relief=tk.FLAT, command=lambda p=full_path: list_device(p) if is_device else list_local(p))
+        btn.pack(side=tk.LEFT)
+        if i < len(parts) - 1:
+            tk.Label(frame, text=" > ").pack(side=tk.LEFT)
+
+def list_local(path):
+    global current_local_path
+    try:
+        path = os.path.normpath(path)
+        current_local_path = path
+        build_breadcrumb(local_path_frame, path)
+        files = os.listdir(path)
+        local_listbox.delete(0, tk.END)
+        if parent(path) != path:
+            local_listbox.insert(tk.END, "..")
+        for f in files:
+            full_path = os.path.join(path, f)
+            local_listbox.insert(tk.END, f + "/" if os.path.isdir(full_path) else f)
+    except Exception as e:
+        messagebox.showerror("Error", f"Local: {e}")
+
+def list_device(path):
+    global current_device_path
+    try:
+        current_device_path = path
+        build_breadcrumb(device_path_frame, path, is_device=True)
+        cmd = [ADB_PATH, "shell", "ls", "-p", path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        device_listbox.delete(0, tk.END)
+        if parent(path) != path:
+            device_listbox.insert(tk.END, "..")
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                if line:
+                    device_listbox.insert(tk.END, line.strip())
+        else:
+            messagebox.showerror("ADB Error", result.stderr)
+    except Exception as e:
+        messagebox.showerror("Error", f"Device: {e}")
+
+def open_local():
+    selection = local_listbox.curselection()
+    if selection:
+        name = local_listbox.get(selection[0])
+        if name == "..":
+            list_local(parent(current_local_path))
+        else:
+            path = os.path.join(current_local_path, name.rstrip("/"))
+            if os.path.isdir(path):
+                list_local(path)
+
+def open_device():
+    selection = device_listbox.curselection()
+    if selection:
+        name = device_listbox.get(selection[0])
+        if name == "..":
+            list_device(parent(current_device_path))
+        elif name.endswith("/"):
+            list_device(current_device_path.rstrip("/") + "/" + name.rstrip("/"))
+
+def push_files():
+    for idx in local_listbox.curselection():
+        file = local_listbox.get(idx)
+        if file == ".." or file.endswith("/"):
+            continue
+        local_path = os.path.normpath(os.path.join(current_local_path, file))
+        subprocess.run([ADB_PATH, "push", local_path, current_device_path])
+    list_device(current_device_path)
+
+def pull_files():
+    dest = filedialog.askdirectory(initialdir=current_local_path)
+    if not dest:
+        return
+    for idx in device_listbox.curselection():
+        file = device_listbox.get(idx)
+        if file == ".." or file.endswith("/"):
+            continue
+        subprocess.run([ADB_PATH, "pull", current_device_path + "/" + file, dest])
+    messagebox.showinfo("Done", "Files copied.")
+
+def delete_selected(listbox, is_device):
+    selected = listbox.curselection()
+    if not selected:
+        return
+    if messagebox.askyesno("Confirm Delete", "Delete selected file(s)?"):
+        for idx in selected:
+            file = listbox.get(idx)
+            if file == "..":
+                continue
+            if is_device:
+                path = current_device_path + "/" + file
+                subprocess.run([ADB_PATH, "shell", "rm", "-rf", path])
+            else:
+                full_path = os.path.normpath(os.path.join(current_local_path, file.rstrip("/")))
+                try:
+                    if os.path.isdir(full_path):
+                        shutil.rmtree(full_path)
+                    else:
+                        os.remove(full_path)
+                except Exception as e:
+                    messagebox.showerror("Delete Error", str(e))
+        if is_device:
+            list_device(current_device_path)
+        else:
+            list_local(current_local_path)
+
+def select_all(listbox): listbox.select_set(0, tk.END)
+def deselect_all(listbox): listbox.select_clear(0, tk.END)
+
+def toggle_select_move_down(listbox):
+    cur = listbox.curselection()
+    if not cur: return
+    i = cur[0]
+    if listbox.selection_includes(i):
+        listbox.selection_clear(i)
+    else:
+        listbox.selection_set(i)
+    next_i = i + 1
+    if next_i < listbox.size():
+        listbox.select_clear(0, tk.END)
+        listbox.select_set(next_i)
+        listbox.activate(next_i)
+        listbox.see(next_i)
+
+def handle_enter(listbox, is_device):
+    cur = listbox.curselection()
+    if not cur: return
+    name = listbox.get(cur[0])
+    if is_device:
+        if name == "..":
+            list_device(parent(current_device_path))
+        elif name.endswith("/"):
+            list_device(current_device_path.rstrip("/") + "/" + name.rstrip("/"))
+    else:
+        if name == "..":
+            list_local(parent(current_local_path))
+        else:
+            path = os.path.join(current_local_path, name.rstrip("/"))
+            if os.path.isdir(path):
+                list_local(path)
+
+def handle_click(event, listbox, is_device):
+    idx = listbox.nearest(event.y)
+    listbox.selection_clear(0, tk.END)
+    listbox.selection_set(idx)
+    listbox.activate(idx)
+    handle_enter(listbox, is_device)
+
+def key_handler(event):
+    focus = root.focus_get()
+    if focus == local_listbox:
+        if event.keysym == "Tab": device_listbox.focus_set()
+        elif event.keysym == "plus": select_all(local_listbox)
+        elif event.keysym == "minus": deselect_all(local_listbox)
+        elif event.keysym == "Delete": delete_selected(local_listbox, False)
+        elif event.keysym == "Insert": toggle_select_move_down(local_listbox)
+        elif event.keysym == "Return": handle_enter(local_listbox, False)
+    elif focus == device_listbox:
+        if event.keysym == "Tab": local_listbox.focus_set()
+        elif event.keysym == "plus": select_all(device_listbox)
+        elif event.keysym == "minus": deselect_all(device_listbox)
+        elif event.keysym == "Delete": delete_selected(device_listbox, True)
+        elif event.keysym == "Insert": toggle_select_move_down(device_listbox)
+        elif event.keysym == "Return": handle_enter(device_listbox, True)
+
+root = tk.Tk()
+root.title("🐾 Kuro Commander 2.1")
+root.geometry("1100x600")
+root.bind("<Key>", key_handler)
+
+# Local
+left_frame = ttk.Frame(root)
+left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+ttk.Label(left_frame, text="Local Files").pack()
+local_path_frame = ttk.Frame(left_frame)
+local_path_frame.pack(fill=tk.X)
+local_listbox = tk.Listbox(left_frame, selectmode=tk.EXTENDED)
+local_listbox.pack(fill=tk.BOTH, expand=True)
+local_listbox.bind("<Double-Button-1>", lambda e: handle_click(e, local_listbox, False))
+ttk.Button(left_frame, text="Open Folder", command=open_local).pack()
+list_local(current_local_path)
+
+# Center
+center_frame = ttk.Frame(root)
+center_frame.pack(side=tk.LEFT, fill=tk.Y)
+ttk.Button(center_frame, text="→ Push →", command=push_files).pack(pady=10)
+ttk.Button(center_frame, text="← Pull ←", command=pull_files).pack(pady=10)
+ttk.Button(center_frame, text="Delete", command=lambda: delete_selected(local_listbox if local_listbox.focus_get() else device_listbox, local_listbox.focus_get() == local_listbox)).pack(pady=10)
+ttk.Button(center_frame, text="Refresh", command=lambda: [list_local(current_local_path), list_device(current_device_path)]).pack(pady=10)
+
+# Device
+right_frame = ttk.Frame(root)
+right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+ttk.Label(right_frame, text="Device Files").pack()
+device_path_frame = ttk.Frame(right_frame)
+device_path_frame.pack(fill=tk.X)
+device_listbox = tk.Listbox(right_frame, selectmode=tk.EXTENDED)
+device_listbox.pack(fill=tk.BOTH, expand=True)
+device_listbox.bind("<Double-Button-1>", lambda e: handle_click(e, device_listbox, True))
+ttk.Button(right_frame, text="Enter Folder", command=open_device).pack()
+list_device(current_device_path)
+
+root.mainloop()
