@@ -1,4 +1,5 @@
 import os
+import hashlib
 import json
 import subprocess
 import sys
@@ -119,6 +120,32 @@ def remote_file_exists(adb: str, path: str) -> bool | None:
         return True
     if result.returncode == 1:
         return False
+    return None
+
+
+def local_file_sha256(path: str) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def remote_file_sha256(adb: str, path: str) -> str | None:
+    quoted_path = shlex.quote(path)
+    for command in (f"toybox sha256sum {quoted_path}", f"sha256sum {quoted_path}"):
+        result = adb_run(adb, ["shell", command], timeout=120)
+        if result.returncode != 0:
+            continue
+        output_parts = result.stdout.strip().split(maxsplit=1)
+        if not output_parts:
+            continue
+        candidate = output_parts[0].lower()
+        if len(candidate) == 64 and all(char in "0123456789abcdef" for char in candidate):
+            return candidate
     return None
 
 
@@ -587,6 +614,25 @@ class KuroLite(tk.Tk):
                 "No files were copied.",
             )
             return
+
+        remote_hashes = {}
+        for name in remote_conflicts:
+            digest = remote_file_sha256(self.adb, f"{CAMERA_PATH}/{name}")
+            if digest:
+                remote_hashes[name] = digest
+
+        identical_paths = set()
+        for path in files:
+            remote_digest = remote_hashes.get(os.path.basename(path))
+            if remote_digest and local_file_sha256(path) == remote_digest:
+                identical_paths.add(path)
+                self.log_line(f"[SKIP] identical on phone: {os.path.basename(path)}")
+
+        if identical_paths:
+            files = [path for path in files if path not in identical_paths]
+            if not files:
+                self.log_line("[DONE] All selected files are already on the phone.")
+                return
 
         seen_names = set()
         duplicate_paths = set()
