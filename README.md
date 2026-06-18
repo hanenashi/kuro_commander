@@ -20,7 +20,9 @@ them to an Android phone's Camera folder over ADB.
 Renaming changes the original local files. Files that already have the selected
 suffix and existing local rename targets are skipped. Before copying, the app
 checks for same-name files on the phone and duplicate selected filenames, then
-offers to overwrite, skip the conflicts, or cancel.
+offers to overwrite, skip, auto-rename, or cancel. Auto-rename chooses an
+available name such as `photo (1).jpg`, renames the local source file, and uses
+the same new name on the phone.
 
 ## Requirements
 

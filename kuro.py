@@ -463,6 +463,84 @@ class KuroLite(tk.Tk):
             self._cancel_flag.set()
             self.log_line("[*] Cancel requested (will stop after current file).")
 
+    def _ask_copy_conflict_action(self, conflict_names: list[str]) -> str:
+        result = {"action": "cancel"}
+        dlg = tk.Toplevel(self)
+        dlg.title("Copy conflicts")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        sample = "\n".join(conflict_names[:12])
+        if len(conflict_names) > 12:
+            sample += "\n…and more."
+        ttk.Label(
+            frame,
+            text=(
+                f"{len(conflict_names)} filename conflict(s) found:\n\n{sample}\n\n"
+                "Auto-rename changes the local source name too."
+            ),
+            justify="left",
+        ).pack(anchor="w")
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(12, 0))
+
+        def choose(action: str):
+            result["action"] = action
+            dlg.destroy()
+
+        ttk.Button(buttons, text="Auto-rename", command=lambda: choose("rename")).pack(side="left")
+        ttk.Button(buttons, text="Overwrite", command=lambda: choose("overwrite")).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Skip", command=lambda: choose("skip")).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=lambda: choose("cancel")).pack(side="right")
+
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+        self.wait_window(dlg)
+        return result["action"]
+
+    def _plan_auto_rename_jobs(
+        self, files: list[str], remote_conflicts: set[str]
+    ) -> list[tuple[str, str, str]] | None:
+        reserved_names = {os.path.basename(path) for path in files}
+        used_targets = set()
+        plans = []
+
+        for path in files:
+            name = os.path.basename(path)
+            if name not in remote_conflicts and name not in used_targets:
+                plans.append((path, path, name))
+                used_targets.add(name)
+                continue
+
+            stem, extension = os.path.splitext(name)
+            index = 1
+            while True:
+                candidate = f"{stem} ({index}){extension}"
+                local_destination = os.path.join(os.path.dirname(path), candidate)
+                index += 1
+
+                if candidate in reserved_names or candidate in used_targets:
+                    continue
+                if os.path.exists(local_destination):
+                    continue
+
+                exists = remote_file_exists(self.adb, f"{CAMERA_PATH}/{candidate}")
+                if exists is None:
+                    return None
+                if exists:
+                    continue
+
+                plans.append((path, local_destination, candidate))
+                reserved_names.add(candidate)
+                used_targets.add(candidate)
+                break
+
+        return plans
+
     def copy_to_camera(self):
         if self._busy:
             return
@@ -518,43 +596,76 @@ class KuroLite(tk.Tk):
                 duplicate_paths.add(path)
             seen_names.add(name)
 
+        jobs = [(path, os.path.basename(path)) for path in files]
         if remote_conflicts or duplicate_paths:
             conflict_names = sorted(remote_conflicts | {os.path.basename(p) for p in duplicate_paths})
-            sample = "\n".join(conflict_names[:12])
-            if len(conflict_names) > 12:
-                sample += "\n…and more."
-            overwrite = messagebox.askyesnocancel(
-                "Copy conflicts",
-                f"{len(conflict_names)} filename conflict(s) found:\n\n{sample}\n\n"
-                "Yes: overwrite\nNo: skip conflicts\nCancel: stop",
-            )
-            if overwrite is None:
+            action = self._ask_copy_conflict_action(conflict_names)
+            if action == "cancel":
                 return
-            if not overwrite:
-                filtered_files = []
+            if action == "skip":
+                jobs = []
                 accepted_names = set()
                 for path in files:
                     name = os.path.basename(path)
                     if name in remote_conflicts or name in accepted_names:
                         self.log_line(f"[SKIP] copy conflict: {name}")
                         continue
-                    filtered_files.append(path)
+                    jobs.append((path, name))
                     accepted_names.add(name)
-                files = filtered_files
-                if not files:
+                if not jobs:
                     messagebox.showinfo("Copy to Camera", "All selected files were skipped.")
+                    return
+            elif action == "rename":
+                plans = self._plan_auto_rename_jobs(files, remote_conflicts)
+                if plans is None:
+                    messagebox.showerror(
+                        "Copy to Camera",
+                        "Could not find available names on the phone.\nNo files were renamed or copied.",
+                    )
+                    return
+
+                jobs = []
+                renamed_paths = {}
+                rename_failures = 0
+                for source, local_destination, phone_name in plans:
+                    if source != local_destination:
+                        try:
+                            os.rename(source, local_destination)
+                            renamed_paths[source] = local_destination
+                            self.log_line(
+                                f"[RENAME] {os.path.basename(source)} -> {os.path.basename(local_destination)}"
+                            )
+                        except OSError as exc:
+                            rename_failures += 1
+                            self.log_line(f"[FAIL] Could not rename {source}: {exc}")
+                            continue
+                    jobs.append((local_destination, phone_name))
+
+                if renamed_paths:
+                    self.files = [renamed_paths.get(path, path) for path in self.files]
+                    self.listbox.delete(0, "end")
+                    for path in self.files:
+                        self.listbox.insert("end", path)
+                    self._update_status()
+
+                if rename_failures:
+                    messagebox.showwarning(
+                        "Auto-rename",
+                        f"{rename_failures} file(s) could not be renamed and will be skipped.",
+                    )
+                if not jobs:
                     return
 
         self._cancel_flag.clear()
         self._set_busy(True)
-        self._uiq.put(("log", f"[*] Copy start: {len(files)} file(s) -> {CAMERA_PATH}"))
+        self._uiq.put(("log", f"[*] Copy start: {len(jobs)} file(s) -> {CAMERA_PATH}"))
         self._uiq.put(("progress", 0.0, "Preparing…"))
 
-        self._copy_thread = threading.Thread(target=self._copy_worker, args=(files,), daemon=True)
+        self._copy_thread = threading.Thread(target=self._copy_worker, args=(jobs,), daemon=True)
         self._copy_thread.start()
 
-    def _copy_worker(self, files: list[str]):
-        total = len(files)
+    def _copy_worker(self, jobs: list[tuple[str, str]]):
+        total = len(jobs)
         ok = 0
         fail = 0
         cancelled = False
@@ -565,17 +676,16 @@ class KuroLite(tk.Tk):
             self._uiq.put(("done", 0, total, False))
             return
 
-        for idx, p in enumerate(files, 1):
+        for idx, (path, phone_name) in enumerate(jobs, 1):
             if self._cancel_flag.is_set():
                 cancelled = True
                 break
 
-            name = os.path.basename(p)
             pct = (idx - 1) / max(total, 1) * 100.0
-            self._uiq.put(("progress", pct, f"{idx}/{total} … {name}"))
-            self._uiq.put(("log", f"[{idx}/{total}] push {name}"))
+            self._uiq.put(("progress", pct, f"{idx}/{total} … {phone_name}"))
+            self._uiq.put(("log", f"[{idx}/{total}] push {phone_name}"))
 
-            r = adb_run(self.adb, ["push", p, f"{CAMERA_PATH}/{name}"])
+            r = adb_run(self.adb, ["push", path, f"{CAMERA_PATH}/{phone_name}"])
             if r.returncode != 0:
                 fail += 1
                 self._uiq.put(("log", "[FAIL] adb push"))
