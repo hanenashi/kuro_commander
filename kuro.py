@@ -1,259 +1,598 @@
 import os
-import subprocess
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-import string
-import shutil
 import json
+import subprocess
+import sys
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+import queue
 
-ADB_PATH = r"C:\Users\hanenashi\AppData\Local\Android\Sdk\platform-tools\adb.exe"
-PIXEL_PATH = "/storage/emulated/0"
-CAMERA_PATH = f"{PIXEL_PATH}/DCIM/Camera"
-SETTINGS_FILE = "kuro_settings.json"
+APP_TITLE = "Kuro Lite – Rename & Copy to Camera"
+CAMERA_PATH = "/storage/emulated/0/DCIM/Camera"
 
-class KuroCommander:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("🐾 Kuro Commander 2.6")
-        self.root.geometry("1100x600")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+ADB_FALLBACK = r"C:\Users\hanenashi\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 
-        self.left_type = tk.StringVar()
-        self.right_type = tk.StringVar()
-        self.left_path = os.getcwd()
-        self.right_path = PIXEL_PATH
+RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+SOURCE_SETTINGS_PATH = os.path.join(RESOURCE_DIR, "kuro_settings.json")
+SETTINGS_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "KuroCommander"
+)
+SETTINGS_PATH = os.path.join(SETTINGS_DIR, "settings.json")
 
-        self.load_settings()
-        self.init_ui()
-        self.refresh_panel("left")
-        self.refresh_panel("right")
+REQUIRED_ADB_DLLS = ["AdbWinApi.dll", "AdbWinUsbApi.dll"]
 
-    def init_ui(self):
-        self.paned = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        self.paned.pack(fill=tk.BOTH, expand=True)
 
-        self.left_frame = ttk.Frame(self.paned)
-        self.right_frame = ttk.Frame(self.paned)
-        self.paned.add(self.left_frame, weight=1)
-        self.paned.add(self.right_frame, weight=1)
+# ---------------- Settings ----------------
 
-        self.left_selector = ttk.Combobox(self.left_frame, textvariable=self.left_type, state="readonly")
-        self.left_selector['values'] = self.list_sources()
-        self.left_selector.bind("<<ComboboxSelected>>", lambda e: self.switch_source("left"))
-        self.left_selector.pack(fill=tk.X)
-
-        self.left_path_label = ttk.Label(self.left_frame, text=self.left_path)
-        self.left_path_label.pack(fill=tk.X)
-
-        self.left_listbox = tk.Listbox(self.left_frame, selectmode=tk.EXTENDED)
-        self.left_listbox.pack(fill=tk.BOTH, expand=True)
-        self.left_listbox.bind("<Double-Button-1>", lambda e: self.enter("left"))
-
-        self.right_selector = ttk.Combobox(self.right_frame, textvariable=self.right_type, state="readonly")
-        self.right_selector['values'] = self.list_sources()
-        self.right_selector.bind("<<ComboboxSelected>>", lambda e: self.switch_source("right"))
-        self.right_selector.pack(fill=tk.X)
-
-        self.right_path_label = ttk.Label(self.right_frame, text=self.right_path)
-        self.right_path_label.pack(fill=tk.X)
-
-        self.right_listbox = tk.Listbox(self.right_frame, selectmode=tk.EXTENDED)
-        self.right_listbox.pack(fill=tk.BOTH, expand=True)
-        self.right_listbox.bind("<Double-Button-1>", lambda e: self.enter("right"))
-
-        self.button_frame = ttk.Frame(self.root)
-        self.button_frame.pack()
-        ttk.Button(self.button_frame, text="→ Copy →", command=self.copy_files).pack(side=tk.LEFT)
-        ttk.Button(self.button_frame, text="📸 Copy to Camera", command=self.copy_to_camera).pack(side=tk.LEFT)
-        ttk.Button(self.button_frame, text="Delete", command=self.delete_files).pack(side=tk.LEFT)
-        ttk.Button(self.button_frame, text="Rename", command=self.rename_files).pack(side=tk.LEFT)
-        ttk.Button(self.button_frame, text="🔁 Rescan Media", command=self.rescan_media).pack(side=tk.LEFT)
-        ttk.Button(self.button_frame, text="Refresh", command=self.refresh_all).pack(side=tk.LEFT)
-
-    def list_sources(self):
-        drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-        return drives + ["Pixel8"]
-
-    def get_panel_info(self, side):
-        t = self.left_type.get() if side == "left" else self.right_type.get()
-        p = self.left_path if side == "left" else self.right_path
-        lb = self.left_listbox if side == "left" else self.right_listbox
-        label = self.left_path_label if side == "left" else self.right_path_label
-        return t, p, lb, label
-
-    def switch_source(self, side):
-        dtype = self.left_type.get() if side == "left" else self.right_type.get()
-        path = PIXEL_PATH if dtype == "Pixel8" else dtype
-        if side == "left":
-            self.left_path = path
-        else:
-            self.right_path = path
-        self.refresh_panel(side)
-
-    def refresh_all(self):
-        self.refresh_panel("left")
-        self.refresh_panel("right")
-
-    def refresh_panel(self, side):
-        dtype, path, lb, label = self.get_panel_info(side)
-        label.config(text=path)
-        lb.delete(0, tk.END)
-        if dtype == "Pixel8":
-            if path != "/":
-                lb.insert(tk.END, "..")
-            try:
-                result = subprocess.run([ADB_PATH, "shell", "ls", "-p", path], capture_output=True)
-                output = result.stdout.decode('utf-8', errors='replace')
-                for f in output.strip().splitlines():
-                    lb.insert(tk.END, f)
-            except Exception as e:
-                messagebox.showerror("ADB Error", str(e))
-        else:
-            if os.path.abspath(path) != os.path.abspath(os.path.join(path, "..")):
-                lb.insert(tk.END, "..")
-            try:
-                for f in os.listdir(path):
-                    lb.insert(tk.END, f)
-            except Exception as e:
-                messagebox.showerror("File Error", str(e))
-
-    def enter(self, side):
-        dtype, path, lb, _ = self.get_panel_info(side)
-        selection = lb.get(tk.ACTIVE)
-        new_path = os.path.dirname(path.rstrip("/\\")) if selection == ".." else os.path.join(path, selection.strip("/")) if dtype != "Pixel8" else f"{path.rstrip('/')}/{selection.strip('/')}"
-        if dtype == "Pixel8" or os.path.isdir(new_path):
-            if side == "left":
-                self.left_path = new_path
-            else:
-                self.right_path = new_path
-            self.refresh_panel(side)
-
-    def copy_files(self):
-        from_type, from_path, from_lb, _ = self.get_panel_info("left")
-        to_type, to_path, _, _ = self.get_panel_info("right")
-        selected = from_lb.curselection()
-        for i in selected:
-            name = from_lb.get(i).rstrip("/")
-            src = os.path.join(from_path, name) if from_type != "Pixel8" else f"{from_path.rstrip('/')}/{name}"
-            dst = os.path.join(to_path, name) if to_type != "Pixel8" else f"{to_path.rstrip('/')}/{name}"
-            try:
-                if from_type == "Pixel8" and to_type != "Pixel8":
-                    subprocess.run([ADB_PATH, "pull", src, dst])
-                elif from_type != "Pixel8" and to_type == "Pixel8":
-                    subprocess.run([ADB_PATH, "push", src, dst])
-                elif from_type != "Pixel8" and to_type != "Pixel8":
-                    shutil.copy2(src, dst)
-                elif from_type == "Pixel8" and to_type == "Pixel8":
-                    subprocess.run([ADB_PATH, "shell", "cp", src, dst])
-            except Exception as e:
-                messagebox.showerror("Copy Error", str(e))
-        self.refresh_panel("right")
-
-    def copy_to_camera(self):
-        from_type, from_path, from_lb, _ = self.get_panel_info("left")
-        selected = from_lb.curselection()
-        if not selected:
-            messagebox.showinfo("Nothing Selected", "No files selected to copy.")
-            return
-
-        copied = False
-        for i in selected:
-            name = from_lb.get(i).rstrip("/")
-            src = os.path.join(from_path, name) if from_type != "Pixel8" else f"{from_path.rstrip('/')}/{name}"
-            dst = f"{CAMERA_PATH}/{name}"
-            try:
-                if from_type == "Pixel8":
-                    subprocess.run([ADB_PATH, "shell", "cp", src, dst])
-                else:
-                    subprocess.run([ADB_PATH, "push", src, dst])
-                copied = True
-            except Exception as e:
-                messagebox.showerror("Copy to Camera Error", str(e))
-
-        if copied:
-            self.rescan_media()
-
-    def rescan_media(self):
+def load_settings():
+    for path in (SETTINGS_PATH, SOURCE_SETTINGS_PATH):
         try:
-            subprocess.run([
-                ADB_PATH, "shell", "content", "call",
-                "--method", "scan_volume",
-                "--uri", "content://media",
-                "--arg", "external_primary"
-            ])
-            messagebox.showinfo("Scan Complete", "Media scan triggered successfully.")
-        except Exception as e:
-            messagebox.showerror("Scan Failed", str(e))
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {}
 
-    def delete_files(self):
-        dtype, path, lb, _ = self.get_panel_info("right")
-        selected = lb.curselection()
-        if not messagebox.askyesno("Delete", "Delete selected files in right pane?"):
-            return
-        for i in selected:
-            name = lb.get(i).rstrip("/")
-            full = os.path.join(path, name) if dtype != "Pixel8" else f"{path.rstrip('/')}/{name}"
-            try:
-                if dtype == "Pixel8":
-                    subprocess.run([ADB_PATH, "shell", "rm", "-rf", full])
-                else:
-                    if os.path.isdir(full):
-                        shutil.rmtree(full)
-                    else:
-                        os.remove(full)
-            except Exception as e:
-                messagebox.showerror("Delete Error", str(e))
-        self.refresh_panel("right")
 
-    def rename_files(self):
-        suffix = simpledialog.askstring("Rename", "Append this to selected filenames:")
-        if not suffix:
-            return
-        for side in ("left", "right"):
-            dtype, path, lb, _ = self.get_panel_info(side)
-            selected = lb.curselection()
-            for i in selected:
-                name = lb.get(i).rstrip("/")
-                base, ext = os.path.splitext(name)
-                new_name = base + suffix + ext
-                src = os.path.join(path, name) if dtype != "Pixel8" else f"{path.rstrip('/')}/{name}"
-                dst = os.path.join(path, new_name) if dtype != "Pixel8" else f"{path.rstrip('/')}/{new_name}"
-                try:
-                    if dtype == "Pixel8":
-                        subprocess.run([ADB_PATH, "shell", "mv", src, dst])
-                    else:
-                        os.rename(src, dst)
-                except Exception as e:
-                    messagebox.showerror("Rename Error", str(e))
-            self.refresh_panel(side)
+def save_settings(data: dict):
+    try:
+        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+# ---------------- ADB helpers ----------------
+
+def _try_run_adb(cmd: str) -> bool:
+    try:
+        result = subprocess.run(
+            [cmd, "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def check_adb_dlls(adb_cmd: str) -> list[str]:
+    if not adb_cmd or not os.path.isabs(adb_cmd):
+        return []
+    folder = os.path.dirname(adb_cmd)
+    missing = []
+    for dll in REQUIRED_ADB_DLLS:
+        if not os.path.isfile(os.path.join(folder, dll)):
+            missing.append(dll)
+    return missing
+
+
+def resolve_adb(settings: dict) -> str | None:
+    user_adb = settings.get("adb_path", "")
+    if isinstance(user_adb, str) and user_adb:
+        if os.path.isfile(user_adb) and _try_run_adb(user_adb):
+            return user_adb
+
+    root_adb = os.path.join(RESOURCE_DIR, "adb.exe")
+    if os.path.isfile(root_adb) and _try_run_adb(root_adb):
+        return root_adb
+
+    if _try_run_adb("adb"):
+        return "adb"
+
+    if os.path.isfile(ADB_FALLBACK) and _try_run_adb(ADB_FALLBACK):
+        return ADB_FALLBACK
+
+    return None
+
+
+def adb_run(adb: str, args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+    command = [adb] + args
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return subprocess.CompletedProcess(command, -1, "", str(exc))
+
+
+def adb_connected(adb: str) -> bool:
+    r = adb_run(adb, ["devices"], timeout=10)
+    if r.returncode != 0:
+        return False
+    return any("\tdevice" in line for line in r.stdout.splitlines())
+
+
+def media_scan_all(adb: str):
+    """
+    One-shot scan after all copies (faster than per-file scanning).
+    Best-effort: Android versions differ in how well this works, but it's the
+    least painful and usually sufficient.
+    """
+    adb_run(adb, [
+        "shell", "content", "call",
+        "--uri", "content://media",
+        "--method", "scan_volume",
+        "--arg", "external_primary"
+    ])
+
+
+# ---------------- UI app ----------------
+
+class KuroLite(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("950x620")
+
+        self.settings = load_settings()
+        self.adb = resolve_adb(self.settings)
+        self.adb_missing_dlls = check_adb_dlls(self.adb) if self.adb else []
+        self._adb_is_connected = adb_connected(self.adb) if self.adb else False
+
+        self.files: list[str] = []
+
+        # worker plumbing
+        self._uiq: "queue.Queue[tuple]" = queue.Queue()
+        self._copy_thread: threading.Thread | None = None
+        self._cancel_flag = threading.Event()
+        self._busy = False
+
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._startup_warnings()
+        self._update_status()
+
+        self.after(80, self._drain_ui_queue)
+
+    # ---------- UI ----------
+
+    def _build_ui(self):
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=6)
+
+        self.btn_select = ttk.Button(top, text="Select files…", command=self.add_files)
+        self.btn_select.pack(side="left")
+
+        self.btn_clear = ttk.Button(top, text="Clear", command=self.clear_files)
+        self.btn_clear.pack(side="left", padx=4)
+
+        ttk.Label(top, text="Suffix:").pack(side="left", padx=(20, 4))
+        self.suffix_var = tk.StringVar(value=self.settings.get("rename_suffix", "_ok"))
+        self.ent_suffix = ttk.Entry(top, textvariable=self.suffix_var, width=14)
+        self.ent_suffix.pack(side="left")
+
+        self.btn_settings = ttk.Button(top, text="Settings", command=self.open_settings)
+        self.btn_settings.pack(side="left", padx=(12, 0))
+
+        self.btn_rename = ttk.Button(top, text="Rename", command=self.rename_files)
+        self.btn_rename.pack(side="right")
+
+        self.btn_copy = ttk.Button(top, text="Copy to Camera", command=self.copy_to_camera)
+        self.btn_copy.pack(side="right", padx=6)
+
+        self.btn_cancel = ttk.Button(top, text="Cancel copy", command=self.cancel_copy, state="disabled")
+        self.btn_cancel.pack(side="right", padx=6)
+
+        # -------- File list with scrollbars --------
+        mid = ttk.Frame(self)
+        mid.pack(fill="both", expand=True, padx=8)
+
+        self.listbox = tk.Listbox(mid, selectmode="extended", activestyle="none")
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+
+        sb_y = ttk.Scrollbar(mid, orient="vertical", command=self.listbox.yview)
+        sb_y.grid(row=0, column=1, sticky="ns")
+
+        sb_x = ttk.Scrollbar(mid, orient="horizontal", command=self.listbox.xview)
+        sb_x.grid(row=1, column=0, sticky="ew")
+
+        self.listbox.config(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
+        self.listbox.bind("<Button-3>", self.popup_menu)
+
+        mid.rowconfigure(0, weight=1)
+        mid.columnconfigure(0, weight=1)
+
+        # progress area
+        pfrm = ttk.Frame(self)
+        pfrm.pack(fill="x", padx=8, pady=(8, 2))
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress = ttk.Progressbar(pfrm, variable=self.progress_var, maximum=100.0)
+        self.progress.pack(side="left", fill="x", expand=True)
+
+        self.progress_label = ttk.Label(pfrm, text="Idle", width=30, anchor="w")
+        self.progress_label.pack(side="left", padx=(8, 0))
+
+        # -------- Log with scrollbar --------
+        logfrm = ttk.Frame(self)
+        logfrm.pack(fill="both", padx=8, pady=(6, 6))
+
+        self.log = tk.Text(logfrm, height=9, bg="#111", fg="#0f0", insertbackground="#0f0", wrap="none")
+        self.log.grid(row=0, column=0, sticky="nsew")
+
+        log_sb_y = ttk.Scrollbar(logfrm, orient="vertical", command=self.log.yview)
+        log_sb_y.grid(row=0, column=1, sticky="ns")
+
+        log_sb_x = ttk.Scrollbar(logfrm, orient="horizontal", command=self.log.xview)
+        log_sb_x.grid(row=1, column=0, sticky="ew")
+
+        self.log.config(yscrollcommand=log_sb_y.set, xscrollcommand=log_sb_x.set, state="disabled")
+
+        logfrm.rowconfigure(0, weight=1)
+        logfrm.columnconfigure(0, weight=1)
+
+        # status
+        self.status = ttk.Label(self, anchor="w")
+        self.status.pack(fill="x", padx=8, pady=(0, 6))
+
+        # popup menu
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label="Rename", command=self.rename_files)
+        self.menu.add_command(label="Copy to Camera", command=self.copy_to_camera)
+        self.menu.add_separator()
+        self.menu.add_command(label="Remove from list", command=self.remove_selected)
+        self.menu.add_command(label="Clear list", command=self.clear_files)
+
+    # ---------- UI safe helpers ----------
+
+    def log_line(self, msg: str):
+        self.log.config(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.config(state="disabled")
+
+    def _startup_warnings(self):
+        if self.adb and self.adb_missing_dlls:
+            msg = (
+                "adb.exe found, but required DLL(s) are missing next to it:\n\n"
+                + "\n".join(f"- {x}" for x in self.adb_missing_dlls)
+                + "\n\nFix: copy these DLLs into the same folder as adb.exe."
+            )
+            messagebox.showwarning("ADB DLLs missing", msg)
+            self.log_line("[WARN] ADB DLLs missing: " + ", ".join(self.adb_missing_dlls))
+
+    def _adb_status_text(self) -> str:
+        if not self.adb:
+            return "ADB: not found"
+
+        adb_label = "adb (PATH)" if not os.path.isabs(self.adb) else (os.path.basename(self.adb) + " (absolute)")
+
+        if self.adb_missing_dlls:
+            return f"ADB: DLL missing ({', '.join(self.adb_missing_dlls)}) | using: {adb_label}"
+
+        if self._adb_is_connected:
+            return f"ADB: device connected | using: {adb_label}"
+        return f"ADB: no device | using: {adb_label}"
+
+    def _update_status(self):
+        self.status.config(text=f"{len(self.files)} files | {self._adb_status_text()}")
+
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        self.btn_select.config(state=state)
+        self.btn_clear.config(state=state)
+        self.btn_settings.config(state=state)
+        self.btn_rename.config(state=state)
+        self.btn_copy.config(state=state)
+        self.ent_suffix.config(state=state)
+        self.btn_cancel.config(state=("normal" if busy else "disabled"))
+
+        if not busy:
+            self.progress_var.set(0.0)
+            self.progress_label.config(text="Idle")
+
+    def _persist_suffix(self):
+        self.settings["rename_suffix"] = self.suffix_var.get()
+        save_settings(self.settings)
+
+    def _recheck_adb(self):
+        self.adb = resolve_adb(self.settings)
+        self.adb_missing_dlls = check_adb_dlls(self.adb) if self.adb else []
+        self._adb_is_connected = adb_connected(self.adb) if self.adb else False
+        self._update_status()
 
     def on_close(self):
-        data = {
-            "left_type": self.left_type.get(),
-            "left_path": self.left_path,
-            "right_type": self.right_type.get(),
-            "right_path": self.right_path
-        }
-        try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
-        self.root.destroy()
+        if self._busy:
+            if not messagebox.askyesno("Copy in progress", "Cancel the copy and close Kuro Commander?"):
+                return
+            self._cancel_flag.set()
+        self.destroy()
 
-    def load_settings(self):
-        if os.path.exists(SETTINGS_FILE):
+    # ---------- queue pump from worker ----------
+
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                item = self._uiq.get_nowait()
+                kind = item[0]
+
+                if kind == "log":
+                    self.log_line(item[1])
+
+                elif kind == "progress":
+                    self.progress_var.set(item[1])
+                    self.progress_label.config(text=item[2])
+
+                elif kind == "done":
+                    ok, fail, cancelled = item[1], item[2], item[3]
+                    if cancelled:
+                        self.log_line(f"[DONE] copy cancelled: ok={ok} fail={fail}")
+                    else:
+                        self.log_line(f"[DONE] copy finished: ok={ok} fail={fail}")
+                    self._set_busy(False)
+                    self._update_status()
+
+        except queue.Empty:
+            pass
+
+        self.after(80, self._drain_ui_queue)
+
+    # ---------- actions ----------
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames()
+        added = 0
+        for p in paths:
+            if p and p not in self.files:
+                self.files.append(p)
+                self.listbox.insert("end", p)
+                added += 1
+        if added:
+            self.log_line(f"[OK] Added {added} file(s).")
+        self._update_status()
+
+    def clear_files(self):
+        self.files.clear()
+        self.listbox.delete(0, "end")
+        self._update_status()
+
+    def remove_selected(self):
+        sel = list(self.listbox.curselection())
+        if not sel:
+            return
+        for i in reversed(sel):
+            self.files.pop(i)
+            self.listbox.delete(i)
+        self._update_status()
+
+    def rename_files(self):
+        if self._busy:
+            return
+        if not self.files:
+            messagebox.showinfo("Rename", "No files selected.")
+            return
+
+        suffix = (self.suffix_var.get() or "").strip()
+        if suffix == "":
+            messagebox.showwarning("Rename", "Suffix is empty.")
+            return
+
+        preview = []
+        for p in self.files:
+            base, ext = os.path.splitext(p)
+            preview.append((p, base + suffix + ext))
+
+        sample = "\n".join(
+            f"{os.path.basename(a)} -> {os.path.basename(b)}"
+            for a, b in preview[:12]
+        )
+        if len(preview) > 12:
+            sample += "\n…and more."
+
+        if not messagebox.askyesno("Confirm rename", sample):
+            return
+
+        renamed = skipped = failed = 0
+        for src, dst in preview:
             try:
-                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.left_type.set(data.get("left_type", "C:\\"))
-                    self.left_path = data.get("left_path", os.getcwd())
-                    self.right_type.set(data.get("right_type", "Pixel8"))
-                    self.right_path = data.get("right_path", PIXEL_PATH)
-            except Exception:
-                pass
+                if os.path.exists(dst):
+                    self.log_line(f"[SKIP] exists: {dst}")
+                    skipped += 1
+                    continue
+                os.rename(src, dst)
+                renamed += 1
+                self.log_line(f"[OK] {os.path.basename(src)} -> {os.path.basename(dst)}")
+                self.files[self.files.index(src)] = dst
+            except Exception as e:
+                failed += 1
+                self.log_line(f"[FAIL] {src}: {e}")
+
+        self.listbox.delete(0, "end")
+        for p in self.files:
+            self.listbox.insert("end", p)
+
+        self._persist_suffix()
+        self._update_status()
+        self.log_line(f"[DONE] rename: ok={renamed} skip={skipped} fail={failed}")
+
+    def cancel_copy(self):
+        if self._busy:
+            self._cancel_flag.set()
+            self.log_line("[*] Cancel requested (will stop after current file).")
+
+    def copy_to_camera(self):
+        if self._busy:
+            return
+
+        if not self.files:
+            messagebox.showinfo("Copy to Camera", "No files selected.")
+            return
+
+        if not self.adb:
+            messagebox.showerror("ADB", "ADB not found.\nPut adb.exe next to kuro.py or set it in Settings.")
+            return
+
+        if self.adb_missing_dlls:
+            messagebox.showerror(
+                "ADB",
+                "ADB is present but missing required DLLs:\n\n"
+                + "\n".join(f"- {x}" for x in self.adb_missing_dlls)
+                + "\n\nCopy them next to adb.exe and restart."
+            )
+            return
+
+        self._adb_is_connected = adb_connected(self.adb)
+        if not self._adb_is_connected:
+            self._update_status()
+            messagebox.showerror("ADB", "No device connected.\nCheck USB debugging and run 'adb devices'.")
+            return
+
+        self._cancel_flag.clear()
+        self._set_busy(True)
+        self._uiq.put(("log", f"[*] Copy start: {len(self.files)} file(s) -> {CAMERA_PATH}"))
+        self._uiq.put(("progress", 0.0, "Preparing…"))
+
+        self._copy_thread = threading.Thread(target=self._copy_worker, daemon=True)
+        self._copy_thread.start()
+
+    def _copy_worker(self):
+        files = list(self.files)
+        total = len(files)
+        ok = 0
+        fail = 0
+        cancelled = False
+
+        mkdir_result = adb_run(self.adb, ["shell", "mkdir", "-p", CAMERA_PATH], timeout=30)
+        if mkdir_result.returncode != 0:
+            self._uiq.put(("log", "[FAIL] Could not prepare the Camera folder: " + mkdir_result.stderr.strip()))
+            self._uiq.put(("done", 0, total, False))
+            return
+
+        for idx, p in enumerate(files, 1):
+            if self._cancel_flag.is_set():
+                cancelled = True
+                break
+
+            name = os.path.basename(p)
+            pct = (idx - 1) / max(total, 1) * 100.0
+            self._uiq.put(("progress", pct, f"{idx}/{total} … {name}"))
+            self._uiq.put(("log", f"[{idx}/{total}] push {name}"))
+
+            r = adb_run(self.adb, ["push", p, f"{CAMERA_PATH}/{name}"])
+            if r.returncode != 0:
+                fail += 1
+                self._uiq.put(("log", "[FAIL] adb push"))
+                err = (r.stderr or "").strip()
+                out = (r.stdout or "").strip()
+                if err:
+                    self._uiq.put(("log", "       " + err))
+                elif out:
+                    self._uiq.put(("log", "       " + out))
+                continue
+
+            ok += 1
+            pct2 = idx / max(total, 1) * 100.0
+            self._uiq.put(("progress", pct2, f"{idx}/{total} pushed"))
+
+        # one-shot scan at end (unless cancelled or nothing copied)
+        if not cancelled and ok > 0:
+            self._uiq.put(("progress", min(99.0, (ok + fail) / max(total, 1) * 100.0), "Scanning media…"))
+            self._uiq.put(("log", "[*] Media scan (one-shot) …"))
+            media_scan_all(self.adb)
+            self._uiq.put(("log", "[OK] Media scan requested."))
+
+        self._uiq.put(("progress", 100.0 if not cancelled else (ok + fail) / max(total, 1) * 100.0,
+                       "Cancelled" if cancelled else "Done"))
+        self._uiq.put(("done", ok, fail, cancelled))
+
+    # ---------- settings dialog ----------
+
+    def open_settings(self):
+        if self._busy:
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Settings")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=10)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="ADB binary (adb.exe):").grid(row=0, column=0, sticky="w")
+
+        adb_var = tk.StringVar(value=self.settings.get("adb_path", ""))
+
+        entry = ttk.Entry(frm, textvariable=adb_var, width=70)
+        entry.grid(row=1, column=0, columnspan=3, sticky="we", pady=(4, 6))
+
+        def browse():
+            path = filedialog.askopenfilename(
+                title="Select adb.exe",
+                filetypes=[("adb.exe", "adb.exe"), ("Executable", "*.exe"), ("All files", "*.*")]
+            )
+            if path:
+                adb_var.set(path)
+
+        def use_bundled_adb():
+            adb_var.set("")
+
+        def test():
+            candidate = adb_var.get().strip()
+            test_adb = resolve_adb({}) if candidate == "" else candidate
+
+            if not test_adb:
+                messagebox.showerror("Test ADB", "ADB not found.")
+                return
+
+            if os.path.isabs(test_adb):
+                missing = check_adb_dlls(test_adb)
+                if missing:
+                    messagebox.showerror(
+                        "Test ADB",
+                        "ADB DLL(s) missing next to selected adb.exe:\n\n"
+                        + "\n".join(f"- {x}" for x in missing)
+                    )
+                    return
+
+            if not _try_run_adb(test_adb):
+                messagebox.showerror("Test ADB", f"Cannot run:\n{test_adb}")
+                return
+
+            r = adb_run(test_adb, ["devices"])
+            body = r.stdout.strip() if r.stdout.strip() else "(no output)"
+            messagebox.showinfo("adb devices", body)
+
+        def save_and_close():
+            p = adb_var.get().strip()
+            if p == "":
+                self.settings.pop("adb_path", None)
+            else:
+                self.settings["adb_path"] = p
+
+            save_settings(self.settings)
+            self._recheck_adb()
+            dlg.destroy()
+
+        ttk.Button(frm, text="Browse…", command=browse).grid(row=2, column=0, sticky="w")
+        ttk.Button(frm, text="Use bundled/default ADB", command=use_bundled_adb).grid(row=2, column=1, sticky="w", padx=6)
+        ttk.Button(frm, text="Test", command=test).grid(row=2, column=2, sticky="e")
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(btns, text="Save", command=save_and_close).pack(side="right", padx=6)
+
+        frm.columnconfigure(0, weight=1)
+
+    # ---------- context menu ----------
+
+    def popup_menu(self, e):
+        if self.files and not self._busy:
+            self.menu.tk_popup(e.x_root, e.y_root)
+
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = KuroCommander(root)
-    root.mainloop()
+    KuroLite().mainloop()

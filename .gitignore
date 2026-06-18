@@ -1,0 +1,12 @@
+# Build output
+/build/
+/dist/
+/*.spec
+/__pycache__/
+*.py[cod]
+
+# Local backups and settings
+/BKP/
+/kuro_settings.json
+
+# Per-user settings are stored under LocalAppData at runtime.
