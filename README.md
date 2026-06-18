@@ -1,5 +1,9 @@
 # Kuro Commander
 
+<p align="center">
+  <img src="kuro.png" alt="Kuro Commander" width="400">
+</p>
+
 Kuro Commander is a small Windows utility for preparing local files and copying
 them to an Android phone's Camera folder over ADB.
 

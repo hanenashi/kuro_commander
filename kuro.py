@@ -143,6 +143,12 @@ class KuroLite(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.geometry("950x620")
+        icon_path = os.path.join(RESOURCE_DIR, "kuro.ico")
+        if os.path.isfile(icon_path):
+            try:
+                self.iconbitmap(icon_path)
+            except tk.TclError:
+                pass
 
         self.settings = load_settings()
         self.adb = resolve_adb(self.settings)

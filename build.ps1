@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$requiredFiles = @("kuro.py", "adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll")
+$requiredFiles = @("kuro.py", "kuro.ico", "adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll")
 foreach ($file in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $file)) {
         throw "Required build file is missing: $file"
@@ -14,7 +14,9 @@ python -m PyInstaller `
     --onefile `
     --windowed `
     --name KuroCommander `
+    --icon kuro.ico `
     --version-file version_info.txt `
+    --add-data "kuro.ico;." `
     --add-binary "adb.exe;." `
     --add-binary "AdbWinApi.dll;." `
     --add-binary "AdbWinUsbApi.dll;." `
