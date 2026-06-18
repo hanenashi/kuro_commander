@@ -8,13 +8,15 @@ them to an Android phone's Camera folder over ADB.
 - Select multiple files from the computer.
 - Batch-rename selected files by adding a suffix before each extension.
 - Copy selected files to `/storage/emulated/0/DCIM/Camera`.
+- Detect rename and phone-copy conflicts before changing files.
 - Request an Android media scan after copying so new files appear in gallery apps.
 - Show copy progress, errors, and connection status without opening a command window.
 - Use the bundled ADB tools or a custom `adb.exe` selected in Settings.
 
-Renaming changes the original local files. Existing local rename targets are
-skipped. Copying a file with the same name as one already on the phone may
-overwrite the phone's existing copy.
+Renaming changes the original local files. Files that already have the selected
+suffix and existing local rename targets are skipped. Before copying, the app
+checks for same-name files on the phone and duplicate selected filenames, then
+offers to overwrite, skip the conflicts, or cancel.
 
 ## Requirements
 

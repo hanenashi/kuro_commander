@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import queue
+import shlex
 
 APP_TITLE = "Kuro Lite – Rename & Copy to Camera"
 CAMERA_PATH = "/storage/emulated/0/DCIM/Camera"
@@ -110,6 +111,15 @@ def adb_connected(adb: str) -> bool:
     if r.returncode != 0:
         return False
     return any("\tdevice" in line for line in r.stdout.splitlines())
+
+
+def remote_file_exists(adb: str, path: str) -> bool | None:
+    result = adb_run(adb, ["shell", f"test -e {shlex.quote(path)}"], timeout=10)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
 
 
 def media_scan_all(adb: str):
@@ -379,9 +389,27 @@ class KuroLite(tk.Tk):
             return
 
         preview = []
+        already_suffixed = 0
+        existing_targets = 0
         for p in self.files:
             base, ext = os.path.splitext(p)
-            preview.append((p, base + suffix + ext))
+            if base.endswith(suffix):
+                already_suffixed += 1
+                continue
+            destination = base + suffix + ext
+            if os.path.exists(destination):
+                existing_targets += 1
+                continue
+            preview.append((p, destination))
+
+        if not preview:
+            messagebox.showinfo(
+                "Rename",
+                "Nothing to rename.\n\n"
+                f"Already suffixed: {already_suffixed}\n"
+                f"Destination exists: {existing_targets}",
+            )
+            return
 
         sample = "\n".join(
             f"{os.path.basename(a)} -> {os.path.basename(b)}"
@@ -389,11 +417,19 @@ class KuroLite(tk.Tk):
         )
         if len(preview) > 12:
             sample += "\n…and more."
+        if already_suffixed or existing_targets:
+            sample += (
+                "\n\nWill skip:"
+                f"\n- Already suffixed: {already_suffixed}"
+                f"\n- Destination exists: {existing_targets}"
+            )
 
         if not messagebox.askyesno("Confirm rename", sample):
             return
 
-        renamed = skipped = failed = 0
+        renamed = 0
+        skipped = already_suffixed + existing_targets
+        failed = 0
         for src, dst in preview:
             try:
                 if os.path.exists(dst):
@@ -448,16 +484,70 @@ class KuroLite(tk.Tk):
             messagebox.showerror("ADB", "No device connected.\nCheck USB debugging and run 'adb devices'.")
             return
 
+        files = list(self.files)
+        remote_conflicts = set()
+        check_failed = False
+        selected_names = {os.path.basename(path) for path in files}
+        for name in selected_names:
+            exists = remote_file_exists(self.adb, f"{CAMERA_PATH}/{name}")
+            if exists is None:
+                check_failed = True
+                break
+            if exists:
+                remote_conflicts.add(name)
+
+        if check_failed:
+            messagebox.showerror(
+                "Copy to Camera",
+                "Could not check the Camera folder for existing files.\n"
+                "No files were copied.",
+            )
+            return
+
+        seen_names = set()
+        duplicate_paths = set()
+        for path in files:
+            name = os.path.basename(path)
+            if name in seen_names:
+                duplicate_paths.add(path)
+            seen_names.add(name)
+
+        if remote_conflicts or duplicate_paths:
+            conflict_names = sorted(remote_conflicts | {os.path.basename(p) for p in duplicate_paths})
+            sample = "\n".join(conflict_names[:12])
+            if len(conflict_names) > 12:
+                sample += "\n…and more."
+            overwrite = messagebox.askyesnocancel(
+                "Copy conflicts",
+                f"{len(conflict_names)} filename conflict(s) found:\n\n{sample}\n\n"
+                "Yes: overwrite\nNo: skip conflicts\nCancel: stop",
+            )
+            if overwrite is None:
+                return
+            if not overwrite:
+                filtered_files = []
+                accepted_names = set()
+                for path in files:
+                    name = os.path.basename(path)
+                    if name in remote_conflicts or name in accepted_names:
+                        self.log_line(f"[SKIP] copy conflict: {name}")
+                        continue
+                    filtered_files.append(path)
+                    accepted_names.add(name)
+                files = filtered_files
+                if not files:
+                    messagebox.showinfo("Copy to Camera", "All selected files were skipped.")
+                    return
+
         self._cancel_flag.clear()
         self._set_busy(True)
-        self._uiq.put(("log", f"[*] Copy start: {len(self.files)} file(s) -> {CAMERA_PATH}"))
+        self._uiq.put(("log", f"[*] Copy start: {len(files)} file(s) -> {CAMERA_PATH}"))
         self._uiq.put(("progress", 0.0, "Preparing…"))
 
-        self._copy_thread = threading.Thread(target=self._copy_worker, daemon=True)
+        self._copy_thread = threading.Thread(target=self._copy_worker, args=(files,), daemon=True)
         self._copy_thread.start()
 
-    def _copy_worker(self):
-        files = list(self.files)
+    def _copy_worker(self, files: list[str]):
         total = len(files)
         ok = 0
         fail = 0
